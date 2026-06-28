@@ -69,8 +69,8 @@ class WizardController:
         self.step_labels: List[ctk.CTkLabel] = []
         self._create_step_indicator()
 
-        # Контейнер для содержимого страницы
-        self.content_frame = ctk.CTkFrame(parent)
+        # Контейнер для содержимого страницы (с прокруткой, если не помещается)
+        self.content_frame = ctk.CTkScrollableFrame(parent)
         self.content_frame.pack(fill="both", expand=True, padx=5, pady=5)
 
         # Навигационные кнопки

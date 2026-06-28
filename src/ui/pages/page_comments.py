@@ -358,7 +358,8 @@ class PageComments(ctk.CTkFrame):
         for widget in [self.freq_frame, self.role_frame, self.custom_frame]:
             for child in widget.winfo_children():
                 if isinstance(child, (ctk.CTkSlider, ctk.CTkOptionMenu, ctk.CTkTextbox, ctk.CTkLabel)):
-                    child.configure(text_color=("gray" if not enabled else None))
+                    if not enabled:
+                        child.configure(text_color="gray")
                 if isinstance(child, (ctk.CTkSlider, ctk.CTkOptionMenu)):
                     child.configure(state=state)
                 if isinstance(child, ctk.CTkTextbox):
