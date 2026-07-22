@@ -1,5 +1,5 @@
 """
-Шаг 6: Настройка частоты комментирования, выбор системного промпта и TTS-движка.
+Шаг 5: Настройка частоты комментирования, выбор системного промпта и TTS-движка.
 """
 
 from __future__ import annotations
@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 # Тексты на разных языках
 COMMENTS_TEXTS = {
     "ru": {
-        "title": "Шаг 6: Настройка комментариев",
+        "title": "Шаг 5: Настройка комментариев",
         "desc": "Настройте частоту комментариев и выберите роль комментатора",
         "enabled_label": "Генерировать AI-комментарии",
         "freq_label": "Частота комментирования:",
@@ -34,7 +34,7 @@ COMMENTS_TEXTS = {
         "gender_female": "Женский",
     },
     "en": {
-        "title": "Step 6: Comment Settings",
+        "title": "Step 5: Comment Settings",
         "desc": "Set comment frequency and choose a commentator role",
         "enabled_label": "Generate AI comments",
         "freq_label": "Comment frequency:",
@@ -49,7 +49,7 @@ COMMENTS_TEXTS = {
         "gender_female": "Female",
     },
     "ja": {
-        "title": "ステップ6: コメント設定",
+        "title": "ステップ5: コメント設定",
         "desc": "コメント頻度とコメンテーターの役割を設定してください",
         "enabled_label": "AIコメントを生成",
         "freq_label": "コメント頻度:",
@@ -64,7 +64,7 @@ COMMENTS_TEXTS = {
         "gender_female": "女性",
     },
     "zh": {
-        "title": "步骤6：评论设置",
+        "title": "步骤5：评论设置",
         "desc": "设置评论频率并选择评论者角色",
         "enabled_label": "生成AI评论",
         "freq_label": "评论频率：",

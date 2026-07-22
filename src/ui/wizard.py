@@ -26,10 +26,10 @@ logger = logging.getLogger(__name__)
 
 # Названия шагов на разных языках
 STEP_NAMES = {
-    "ru": ["Язык", "API", "О нас", "Файл", "Объём", "Комментарии", "Запуск"],
-    "en": ["Language", "API", "About", "File", "Scope", "Comments", "Launch"],
-    "ja": ["言語", "API", "概要", "ファイル", "範囲", "コメント", "開始"],
-    "zh": ["语言", "API", "关于", "文件", "范围", "评论", "启动"],
+    "ru": ["Язык", "API", "О нас", "Файл", "Комментарии", "Объём", "Запуск"],
+    "en": ["Language", "API", "About", "File", "Comments", "Scope", "Launch"],
+    "ja": ["言語", "API", "概要", "ファイル", "コメント", "範囲", "開始"],
+    "zh": ["语言", "API", "关于", "文件", "评论", "范围", "启动"],
 }
 
 # Тексты навигационных кнопок
@@ -142,8 +142,8 @@ class WizardController:
             PageAPI,
             PageLogo,
             PageFile,
-            PageScope,
             PageComments,
+            PageScope,
             PageLaunch,
         ]
 

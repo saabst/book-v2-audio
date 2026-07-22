@@ -1,5 +1,5 @@
 """
-Шаг 5: Настройка объёма озвучки (одна глава, диапазон, вся книга).
+Шаг 6: Настройка объёма озвучки (одна глава, диапазон, вся книга).
 """
 
 from __future__ import annotations
@@ -13,7 +13,7 @@ from src.config.settings import Settings
 # Тексты на разных языках
 SCOPE_TEXTS = {
     "ru": {
-        "title": "Шаг 5: Объём озвучки",
+        "title": "Шаг 6: Объём озвучки",
         "desc": "Выберите, какие главы книги нужно озвучить",
         "all": "Вся книга",
         "range": "Диапазон глав",
@@ -23,7 +23,7 @@ SCOPE_TEXTS = {
         "chapter_num": "Номер главы:",
     },
     "en": {
-        "title": "Step 5: Narration Scope",
+        "title": "Step 6: Narration Scope",
         "desc": "Select which chapters of the book to narrate",
         "all": "Whole book",
         "range": "Chapter range",
@@ -33,7 +33,7 @@ SCOPE_TEXTS = {
         "chapter_num": "Chapter number:",
     },
     "ja": {
-        "title": "ステップ5: ナレーション範囲",
+        "title": "ステップ6: ナレーション範囲",
         "desc": "ナレーションする章を選択してください",
         "all": "全章",
         "range": "章の範囲",
@@ -43,7 +43,7 @@ SCOPE_TEXTS = {
         "chapter_num": "章番号:",
     },
     "zh": {
-        "title": "步骤5：朗读范围",
+        "title": "步骤6：朗读范围",
         "desc": "选择需要朗读的书籍章节",
         "all": "全书",
         "range": "章节范围",

@@ -11,6 +11,7 @@ from typing import Callable, Optional
 import customtkinter as ctk
 
 from src.config.settings import Settings
+from src.core.fb2_parser import FB2Parser
 from src.core.tts_manager import resolve_voice
 
 logger = logging.getLogger(__name__)
@@ -26,6 +27,12 @@ LAUNCH_TEXTS = {
         "freq_label": "Комментарии",
         "freq_format": "каждые {} предложений",
         "freq_off": "Отключены",
+        "scope_label": "Объём озвучки",
+        "scope_all": "Полный",
+        "scope_single": "Глава {}",
+        "scope_range": "Главы с {} по {}",
+        "total_chapters_label": "Всего глав в файле",
+        "total_chapters_unknown": "—",
         "voice_main_label": "Голос текста",
         "voice_comment_label": "Голос комментатора",
         "output_label": "Путь сохранения",
@@ -43,6 +50,12 @@ LAUNCH_TEXTS = {
         "freq_label": "Comments",
         "freq_format": "every {} sentences",
         "freq_off": "Disabled",
+        "scope_label": "Narration scope",
+        "scope_all": "Full book",
+        "scope_single": "Chapter {}",
+        "scope_range": "Chapters {}–{}",
+        "total_chapters_label": "Total chapters in file",
+        "total_chapters_unknown": "—",
         "voice_main_label": "Text voice",
         "voice_comment_label": "Comment voice",
         "output_label": "Output path",
@@ -60,6 +73,12 @@ LAUNCH_TEXTS = {
         "freq_label": "コメント",
         "freq_format": "{}文ごと",
         "freq_off": "無効",
+        "scope_label": "ナレーション範囲",
+        "scope_all": "全章",
+        "scope_single": "第{}章",
+        "scope_range": "第{}章〜第{}章",
+        "total_chapters_label": "ファイル内の総章数",
+        "total_chapters_unknown": "—",
         "voice_main_label": "テキストの声",
         "voice_comment_label": "コメントの声",
         "output_label": "出力先",
@@ -76,6 +95,12 @@ LAUNCH_TEXTS = {
         "freq_label": "评论",
         "freq_format": "每{}句",
         "freq_off": "已禁用",
+        "scope_label": "朗读范围",
+        "scope_all": "全书",
+        "scope_single": "第{}章",
+        "scope_range": "第{}章至第{}章",
+        "total_chapters_label": "文件中总章节数",
+        "total_chapters_unknown": "—",
         "voice_main_label": "正文语音",
         "voice_comment_label": "评论语音",
         "output_label": "输出路径",
@@ -106,6 +131,7 @@ class PageLaunch(ctk.CTkFrame):
         super().__init__(parent)
         self.settings = settings
         self.on_complete = on_complete
+        self._total_chapters: Optional[int] = self._count_chapters()
 
         self._create_widgets()
 
@@ -147,10 +173,18 @@ class PageLaunch(ctk.CTkFrame):
             self.settings.tts_backend, self.settings.tts_backend
         )
 
+        total_display = (
+            str(self._total_chapters)
+            if self._total_chapters is not None
+            else t["total_chapters_unknown"]
+        )
+
         items = [
             (t["lang_label"], self._lang_display(self.settings.book_lang)),
             (t["provider_label"], self.settings.ai_provider.capitalize()),
             (t["freq_label"], self._comment_summary()),
+            (t["scope_label"], self._scope_summary()),
+            (t["total_chapters_label"], total_display),
             (t["voice_main_label"], resolve_voice(
                 self.settings.tts_backend, self.settings.book_lang, self.settings.main_gender,
             )),
@@ -223,6 +257,41 @@ class PageLaunch(ctk.CTkFrame):
         lang = self.settings.ui_lang
         t = LAUNCH_TEXTS.get(lang, LAUNCH_TEXTS["ru"])
         return t["freq_format"].format(self.settings.comment_frequency)
+
+    def _count_chapters(self) -> Optional[int]:
+        """Число глав в выбранном FB2 (для сводки)."""
+        book_path = getattr(self.settings, "book_path", "") or ""
+        if not book_path:
+            return None
+        path = Path(book_path)
+        if not path.exists():
+            return None
+        try:
+            book = FB2Parser().parse(path)
+            return len(book.chapters)
+        except Exception as exc:
+            logger.warning("Не удалось посчитать главы для сводки: %s", exc)
+            return None
+
+    def _scope_summary(self) -> str:
+        """Человекочитаемый объём озвучки по chapter_start/chapter_end."""
+        lang = self.settings.ui_lang
+        t = LAUNCH_TEXTS.get(lang, LAUNCH_TEXTS["ru"])
+        start = int(getattr(self.settings, "chapter_start", 0) or 0)
+        end = int(getattr(self.settings, "chapter_end", 0) or 0)
+
+        # Как в pipeline: 0/0 = вся книга
+        if start == 0 and end == 0:
+            return t["scope_all"]
+
+        # Одна глава: end == start + 1 (индексы 0-based / exclusive end)
+        if end == start + 1:
+            return t["scope_single"].format(start + 1)
+
+        # Диапазон: отображаем 1-based включительно
+        from_ch = start + 1
+        to_ch = end if end > 0 else (self._total_chapters or from_ch)
+        return t["scope_range"].format(from_ch, to_ch)
 
     def _get_launch_text(self) -> str:
         """Получение текста кнопки запуска."""
