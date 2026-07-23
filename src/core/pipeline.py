@@ -155,11 +155,17 @@ class Pipeline:
                     continue
 
                 chapter_progress = 0.1 + (idx / len(chapters_to_process)) * 0.8
+                chapter_label = f"Глава {chapter_num + 1}/{total_chapters}"
+                if chapter.title:
+                    title = chapter.title.strip()
+                    if len(title) > 72:
+                        title = title[:69] + "…"
+                    chapter_label = f"{chapter_label} «{title}»"
 
                 # Разбиение на предложения
                 self._report(
                     progress_callback,
-                    f"Глава {chapter_num + 1}/{total_chapters}: разбиение на предложения...",
+                    f"{chapter_label}: разбиение на предложения...",
                     chapter_progress,
                 )
                 sentences = self.sentence_splitter.split(
@@ -175,7 +181,7 @@ class Pipeline:
                 if self.config.comment_config.enabled:
                     self._report(
                         progress_callback,
-                        f"Глава {chapter_num + 1}/{total_chapters}: генерация комментариев...",
+                        f"{chapter_label}: генерация комментариев...",
                         chapter_progress + 0.05,
                     )
                     comments = await self.comment_manager.generate_all(
@@ -188,7 +194,7 @@ class Pipeline:
                 # Синтез речи
                 self._report(
                     progress_callback,
-                    f"Глава {chapter_num + 1}/{total_chapters}: синтез речи...",
+                    f"{chapter_label}: синтез речи...",
                     chapter_progress + 0.2,
                 )
 
@@ -203,7 +209,7 @@ class Pipeline:
                 # Склейка аудиофрагментов главы
                 self._report(
                     progress_callback,
-                    f"Глава {chapter_num + 1}/{total_chapters}: склейка аудио...",
+                    f"{chapter_label}: склейка аудио...",
                     chapter_progress + 0.4,
                 )
 

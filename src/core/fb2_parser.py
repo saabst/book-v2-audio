@@ -54,6 +54,9 @@ class FB2Parser:
         "xlink": "http://www.w3.org/1999/xlink",
     }
 
+    # Разделитель пути для вложенных секций: «ЧАСТЬ › ЯПОНИЯ»
+    TITLE_PATH_SEP = " › "
+
     # Теги, которые нужно удалить из текста
     REMOVE_TAGS = {
         "image", "empty-line", "poem", "subtitle",
@@ -127,55 +130,113 @@ class FB2Parser:
 
         return metadata
 
+    @staticmethod
+    def _local_tag(element: ET.Element) -> str:
+        tag = element.tag
+        return tag.split("}")[-1] if "}" in tag else tag
+
     def _parse_chapters(self, root: ET.Element, ns: dict) -> List[Chapter]:
-        """Извлечение глав из FB2."""
+        """Извлечение глав из FB2.
+
+        Вложенные ``<section>`` разворачиваются в отдельные главы.
+        Заголовок — путь: «ЧАСТЬ ПЕРВАЯ › ЯПОНИЯ».
+        """
         chapters: List[Chapter] = []
 
-        # Ищем body (основной текст)
         body = root.find("fb:body", ns) if ns else root.find("body")
         if body is None:
             logger.warning("Не найден блок body")
             return chapters
 
-        # Ищем секции (главы)
         sections = body.findall("fb:section", ns) if ns else body.findall("section")
 
         if not sections:
-            # Если нет секций — весь body это одна глава
-            chapter = self._parse_section(body, ns)
-            if chapter.paragraphs:
+            chapter = self._chapter_from_own_content(body, ns, path=[])
+            if chapter is not None:
                 chapters.append(chapter)
         else:
             for section in sections:
-                chapter = self._parse_section(section, ns)
-                if chapter.paragraphs:
-                    chapters.append(chapter)
+                self._walk_section(section, ns, path=[], out=chapters)
 
         return chapters
 
-    def _parse_section(self, section: ET.Element, ns: dict) -> Chapter:
-        """Парсинг одной секции в главу."""
-        chapter = Chapter()
+    def _walk_section(
+        self,
+        section: ET.Element,
+        ns: dict,
+        path: List[str],
+        out: List[Chapter],
+    ) -> None:
+        """Рекурсивный обход секций: leaf и intro-текст родителя → главы."""
+        title = self._section_title(section, ns)
+        new_path = path + ([title] if title else [])
+        children = (
+            section.findall("fb:section", ns) if ns else section.findall("section")
+        )
+        own = self._own_paragraphs(section, ns)
 
-        # Заголовок секции
+        if children:
+            # Текст дочерних секций не включаем; собственный intro — отдельная глава
+            if own:
+                out.append(Chapter(
+                    title=self.TITLE_PATH_SEP.join(new_path) if new_path else "",
+                    paragraphs=own,
+                ))
+            for child in children:
+                self._walk_section(child, ns, new_path, out)
+            return
+
+        if own:
+            out.append(Chapter(
+                title=self.TITLE_PATH_SEP.join(new_path) if new_path else "",
+                paragraphs=own,
+            ))
+
+    def _chapter_from_own_content(
+        self,
+        section: ET.Element,
+        ns: dict,
+        path: List[str],
+    ) -> Optional[Chapter]:
+        own = self._own_paragraphs(section, ns)
+        if not own:
+            return None
+        return Chapter(
+            title=self.TITLE_PATH_SEP.join(path) if path else self._section_title(section, ns),
+            paragraphs=own,
+        )
+
+    def _section_title(self, section: ET.Element, ns: dict) -> str:
+        """Заголовок секции; несколько <p> в <title> склеиваются через пробел."""
         title_elem = section.find("fb:title", ns) if ns else section.find("title")
-        if title_elem is not None:
-            chapter.title = self._get_inner_text(title_elem).strip()
+        if title_elem is None:
+            return ""
+        paras = title_elem.findall("fb:p", ns) if ns else title_elem.findall("p")
+        if paras:
+            parts = [self._get_inner_text(p).strip() for p in paras]
+            return " ".join(p for p in parts if p)
+        return self._get_inner_text(title_elem).strip()
 
-        # Абзацы
-        for p in section.findall(".//fb:p", ns) if ns else section.findall(".//p"):
-            # Пропускаем абзацы внутри удаляемых тегов
-            parent = p.findparent() if hasattr(p, 'findparent') else None
-            if parent is not None:
-                parent_tag = parent.tag.split("}")[-1] if "}" in parent.tag else parent.tag
-                if parent_tag in self.REMOVE_TAGS:
-                    continue
-
-            text = self._get_inner_text(p).strip()
-            if text:
-                chapter.paragraphs.append(text)
-
-        return chapter
+    def _own_paragraphs(self, section: ET.Element, ns: dict) -> List[str]:
+        """Абзацы этой секции без вложенных <section> и без <title>."""
+        texts: List[str] = []
+        for child in section:
+            tag = self._local_tag(child)
+            if tag in ("section", "title"):
+                continue
+            if tag in self.REMOVE_TAGS:
+                continue
+            if tag == "p":
+                text = self._get_inner_text(child).strip()
+                if text:
+                    texts.append(text)
+                continue
+            # Прочие контейнеры (annotation и т.п.) — только их <p>
+            for p in (child.findall(".//fb:p", ns) if ns else child.findall(".//p")):
+                text = self._get_inner_text(p).strip()
+                if text:
+                    texts.append(text)
+        return texts
 
     def _get_text(self, element: ET.Element, tag: str, ns: dict) -> str:
         """Получение текста из дочернего элемента."""
