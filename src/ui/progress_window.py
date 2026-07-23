@@ -1,6 +1,6 @@
 """
 Окно прогресса создания аудиокниги.
-Отображает полосу прогресса, текущую главу, процент выполнения и оценку времени.
+Отображает этап, объём/текущую главу, полосу прогресса и оценку времени.
 """
 
 from __future__ import annotations
@@ -13,6 +13,15 @@ from typing import Callable, Optional
 
 import customtkinter as ctk
 
+from src.utils.scope_display import (
+    STAGE_PREPARE,
+    STAGE_SYNTH,
+    STAGE_CHAPTER_MERGE,
+    STAGE_BOOK_MERGE,
+    STAGE_DONE,
+    STAGE_LABELS,
+)
+
 logger = logging.getLogger(__name__)
 
 
@@ -20,10 +29,9 @@ class ProgressWindow(ctk.CTkToplevel):
     """Окно прогресса создания аудиокниги.
 
     Отображает:
-    - Полосу прогресса
-    - Текущий статус
-    - Процент выполнения
-    - Оценку оставшегося времени
+    - Текущий этап (синтез / склейка глав / склейка книги)
+    - Текущую главу, режим объёма и всего глав
+    - Полосу прогресса и оценку времени
     - Кнопки паузы и отмены
     """
 
@@ -34,7 +42,7 @@ class ProgressWindow(ctk.CTkToplevel):
     ):
         super().__init__(parent)
         self.title(title)
-        self.geometry("500x300")
+        self.geometry("520x340")
         self.resizable(False, False)
 
         # Центрируем относительно родителя
@@ -75,29 +83,39 @@ class ProgressWindow(ctk.CTkToplevel):
             text="Создание аудиокниги",
             font=ctk.CTkFont(size=18, weight="bold"),
         )
-        self.title_label.pack(pady=(0, 15))
+        self.title_label.pack(pady=(0, 10))
 
-        # Статус
+        # Этап вместо процента
+        self.stage_label = ctk.CTkLabel(
+            main_frame,
+            text=STAGE_LABELS[STAGE_PREPARE],
+            font=ctk.CTkFont(size=15, weight="bold"),
+        )
+        self.stage_label.pack(pady=(0, 6))
+
+        # Глава / объём / всего
+        self.scope_label = ctk.CTkLabel(
+            main_frame,
+            text="",
+            font=ctk.CTkFont(size=12),
+            text_color="gray",
+            wraplength=470,
+        )
+        self.scope_label.pack(pady=(0, 8))
+
+        # Статус (детали: сегменты и т.п.)
         self.status_label = ctk.CTkLabel(
             main_frame,
             text="Подготовка...",
-            font=ctk.CTkFont(size=13),
-            wraplength=450,
+            font=ctk.CTkFont(size=12),
+            wraplength=470,
         )
         self.status_label.pack(pady=(0, 10))
 
         # Полоса прогресса
-        self.progress_bar = ctk.CTkProgressBar(main_frame, width=400)
-        self.progress_bar.pack(pady=(0, 10))
+        self.progress_bar = ctk.CTkProgressBar(main_frame, width=420)
+        self.progress_bar.pack(pady=(0, 8))
         self.progress_bar.set(0.0)
-
-        # Процент
-        self.percent_label = ctk.CTkLabel(
-            main_frame,
-            text="0%",
-            font=ctk.CTkFont(size=13),
-        )
-        self.percent_label.pack(pady=(0, 5))
 
         # Оценка времени
         self.time_label = ctk.CTkLabel(
@@ -116,7 +134,7 @@ class ProgressWindow(ctk.CTkToplevel):
             self.detail_frame,
             text="",
             font=ctk.CTkFont(size=11),
-            wraplength=450,
+            wraplength=470,
             justify="left",
             anchor="w",
             text_color="gray",
@@ -192,21 +210,36 @@ class ProgressWindow(ctk.CTkToplevel):
         engine: Optional[str] = None,
         segment_index: Optional[int] = None,
         segment_total: Optional[int] = None,
+        stage: Optional[str] = None,
+        scope_line: Optional[str] = None,
     ):
         """Обновление прогресса.
 
         Args:
             status: Текстовый статус.
-            progress: Прогресс от 0.0 до 1.0.
+            progress: Прогресс от 0.0 до 1.0 (для полосы и ETA).
             current_text: Текст текущего синтезируемого сегмента.
             voice: Имя голоса.
             engine: Название TTS-движка.
             segment_index: Номер текущего сегмента.
             segment_total: Всего сегментов.
+            stage: Код этапа (synth / chapter_merge / book_merge …).
+            scope_line: Строка «Глава N · режим · всего глав X».
         """
         # Обновление в главном потоке
-        self.after(0, self._do_update_progress, status, progress,
-                   current_text, voice, engine, segment_index, segment_total)
+        self.after(
+            0,
+            self._do_update_progress,
+            status,
+            progress,
+            current_text,
+            voice,
+            engine,
+            segment_index,
+            segment_total,
+            stage,
+            scope_line,
+        )
 
     def _do_update_progress(
         self,
@@ -217,12 +250,20 @@ class ProgressWindow(ctk.CTkToplevel):
         engine: Optional[str] = None,
         segment_index: Optional[int] = None,
         segment_total: Optional[int] = None,
+        stage: Optional[str] = None,
+        scope_line: Optional[str] = None,
     ):
         """Обновление виджетов прогресса (в главном потоке)."""
         try:
+            if stage:
+                self.stage_label.configure(
+                    text=STAGE_LABELS.get(stage, stage),
+                )
+            if scope_line is not None:
+                self.scope_label.configure(text=scope_line)
+
             self.status_label.configure(text=status)
-            self.progress_bar.set(progress)
-            self.percent_label.configure(text=f"{int(progress * 100)}%")
+            self.progress_bar.set(max(0.0, min(1.0, progress)))
 
             # Оценка времени
             elapsed = time.time() - self._start_time
@@ -233,6 +274,10 @@ class ProgressWindow(ctk.CTkToplevel):
                     self.time_label.configure(
                         text=f"Прошло: {self._format_time(elapsed)} | "
                              f"Осталось: {self._format_time(remaining)}"
+                    )
+                else:
+                    self.time_label.configure(
+                        text=f"Прошло: {self._format_time(elapsed)}"
                     )
             else:
                 self.time_label.configure(
@@ -251,7 +296,12 @@ class ProgressWindow(ctk.CTkToplevel):
 
                 parts = []
                 if engine:
-                    engine_name = {"edge": "Edge TTS", "piper": "Piper (локальный)"}.get(engine, engine)
+                    engine_name = {
+                        "edge": "Edge TTS",
+                        "piper": "Piper (локальный)",
+                        "silero": "Silero TTS",
+                        "supertonic": "Supertonic 3",
+                    }.get(engine, engine)
                     parts.append(f"⚙ {engine_name}")
                 if voice:
                     # Краткое имя голоса (убираем префикс языка)

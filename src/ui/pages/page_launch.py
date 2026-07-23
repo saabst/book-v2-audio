@@ -11,7 +11,9 @@ from typing import Callable, Optional
 import customtkinter as ctk
 
 from src.config.settings import Settings
+from src.core.fb2_parser import FB2Parser
 from src.core.tts_manager import resolve_voice
+from src.utils.scope_display import format_scope
 
 logger = logging.getLogger(__name__)
 
@@ -26,6 +28,9 @@ LAUNCH_TEXTS = {
         "freq_label": "Комментарии",
         "freq_format": "каждые {} предложений",
         "freq_off": "Отключены",
+        "scope_label": "Объём озвучки",
+        "total_chapters_label": "Всего глав в файле",
+        "total_chapters_unknown": "—",
         "voice_main_label": "Голос текста",
         "voice_comment_label": "Голос комментатора",
         "output_label": "Путь сохранения",
@@ -43,6 +48,9 @@ LAUNCH_TEXTS = {
         "freq_label": "Comments",
         "freq_format": "every {} sentences",
         "freq_off": "Disabled",
+        "scope_label": "Narration scope",
+        "total_chapters_label": "Total chapters in file",
+        "total_chapters_unknown": "—",
         "voice_main_label": "Text voice",
         "voice_comment_label": "Comment voice",
         "output_label": "Output path",
@@ -60,6 +68,9 @@ LAUNCH_TEXTS = {
         "freq_label": "コメント",
         "freq_format": "{}文ごと",
         "freq_off": "無効",
+        "scope_label": "ナレーション範囲",
+        "total_chapters_label": "ファイル内の総章数",
+        "total_chapters_unknown": "—",
         "voice_main_label": "テキストの声",
         "voice_comment_label": "コメントの声",
         "output_label": "出力先",
@@ -76,6 +87,9 @@ LAUNCH_TEXTS = {
         "freq_label": "评论",
         "freq_format": "每{}句",
         "freq_off": "已禁用",
+        "scope_label": "朗读范围",
+        "total_chapters_label": "文件中总章节数",
+        "total_chapters_unknown": "—",
         "voice_main_label": "正文语音",
         "voice_comment_label": "评论语音",
         "output_label": "输出路径",
@@ -106,6 +120,7 @@ class PageLaunch(ctk.CTkFrame):
         super().__init__(parent)
         self.settings = settings
         self.on_complete = on_complete
+        self._total_chapters: Optional[int] = self._count_chapters()
 
         self._create_widgets()
 
@@ -147,10 +162,18 @@ class PageLaunch(ctk.CTkFrame):
             self.settings.tts_backend, self.settings.tts_backend
         )
 
+        total_display = (
+            str(self._total_chapters)
+            if self._total_chapters is not None
+            else t["total_chapters_unknown"]
+        )
+
         items = [
             (t["lang_label"], self._lang_display(self.settings.book_lang)),
             (t["provider_label"], self.settings.ai_provider.capitalize()),
             (t["freq_label"], self._comment_summary()),
+            (t["scope_label"], self._scope_summary()),
+            (t["total_chapters_label"], total_display),
             (t["voice_main_label"], resolve_voice(
                 self.settings.tts_backend, self.settings.book_lang, self.settings.main_gender,
             )),
@@ -181,19 +204,6 @@ class PageLaunch(ctk.CTkFrame):
                 anchor="w",
             ).pack(side="left", padx=5, pady=2)
 
-        # Кнопка запуска
-        self.launch_btn = ctk.CTkButton(
-            self,
-            text=self._get_launch_text(),
-            font=ctk.CTkFont(size=16, weight="bold"),
-            command=self._on_launch,
-            height=50,
-            width=400,
-            fg_color="green",
-            hover_color="darkgreen",
-        )
-        self.launch_btn.pack(pady=30)
-
         # Предупреждение
         warning = ctk.CTkLabel(
             self,
@@ -202,7 +212,7 @@ class PageLaunch(ctk.CTkFrame):
             text_color="orange",
             justify="center",
         )
-        warning.pack(pady=(0, 10))
+        warning.pack(pady=(20, 10))
 
     def _lang_display(self, code: str) -> str:
         """Конвертация кода языка в отображаемое название."""
@@ -224,21 +234,29 @@ class PageLaunch(ctk.CTkFrame):
         t = LAUNCH_TEXTS.get(lang, LAUNCH_TEXTS["ru"])
         return t["freq_format"].format(self.settings.comment_frequency)
 
-    def _get_launch_text(self) -> str:
-        """Получение текста кнопки запуска."""
-        lang = self.settings.ui_lang
-        t = LAUNCH_TEXTS.get(lang, LAUNCH_TEXTS["ru"])
-        book_path = getattr(self.settings, "book_path", "")
-        if book_path:
-            name = Path(str(book_path)).stem
-            return f'{t["launch_default"]} "{name}"'
-        return t["launch_default"]
+    def _count_chapters(self) -> Optional[int]:
+        """Число глав в выбранном FB2 (для сводки)."""
+        book_path = getattr(self.settings, "book_path", "") or ""
+        if not book_path:
+            return None
+        path = Path(book_path)
+        if not path.exists():
+            return None
+        try:
+            book = FB2Parser().parse(path)
+            return len(book.chapters)
+        except Exception as exc:
+            logger.warning("Не удалось посчитать главы для сводки: %s", exc)
+            return None
 
-    def _on_launch(self):
-        """Обработчик нажатия кнопки запуска."""
-        logger.info("Запуск создания аудиокниги")
-        if self.on_complete:
-            self.on_complete()
+    def _scope_summary(self) -> str:
+        """Человекочитаемый объём озвучки по chapter_start/chapter_end."""
+        return format_scope(
+            int(getattr(self.settings, "chapter_start", 0) or 0),
+            int(getattr(self.settings, "chapter_end", 0) or 0),
+            self._total_chapters,
+            self.settings.ui_lang,
+        )
 
     def get_data(self) -> dict:
         """Сбор данных со страницы."""

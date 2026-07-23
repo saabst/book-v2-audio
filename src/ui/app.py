@@ -19,8 +19,9 @@ from src.config.settings import Settings, load_settings, save_settings
 from src.config.key_manager import KeyManager
 from src.core.comment_manager import CommentConfig
 from src.core.pipeline import AppConfig, Pipeline
+from src.core.tts_base import SynthesisCancelled
 from src.core.tts_manager import TTSConfig, resolve_voice
-from src.ui.progress_window import ProgressWindow
+from src.ui.pages.page_create import PageCreate
 from src.ui.wizard import WizardController
 
 logger = logging.getLogger(__name__)
@@ -65,8 +66,10 @@ class AudiobookApp(ctk.CTk):
         self.settings = settings or load_settings()
         self.wizard: Optional[WizardController] = None
         self._pipeline: Optional[Pipeline] = None
-        self._progress_window: Optional[ProgressWindow] = None
+        self._progress_page: Optional[PageCreate] = None
         self._pipeline_thread: Optional[threading.Thread] = None
+        self._pipeline_started = False
+        self._user_canceled = False
         # Единая очередь для ВСЕХ сообщений из pipeline-потока
         self._msg_queue: queue.Queue = queue.Queue()
 
@@ -156,39 +159,34 @@ class AudiobookApp(ctk.CTk):
         self.geometry(f"{width}x{height}+{x}+{y}")
 
     def on_wizard_complete(self):
-        """Обработчик завершения мастера — запуск создания аудиокниги."""
-        logger.info("Мастер завершён, запуск процесса создания аудиокниги")
-        # Сохраняем настройки
+        """Старт создания: вызывается со шага «Создание» (PageCreate)."""
+        if self._pipeline_thread and self._pipeline_thread.is_alive():
+            logger.warning("Pipeline ещё работает или завершается — повторный старт пропущен")
+            return
+
+        logger.info("Запуск процесса создания аудиокниги")
         save_settings(self.settings)
 
-        # Создаём новую очередь для этого запуска
+        page = self.wizard.get_current_page() if self.wizard else None
+        if not isinstance(page, PageCreate):
+            logger.error("Шаг Создание не активен — pipeline не запущен")
+            return
+
+        self._progress_page = page
+        self._pipeline_started = True
+        self._user_canceled = False
         self._msg_queue = queue.Queue()
 
-        # Открываем окно прогресса
-        self._progress_window = ProgressWindow(self)
-        self._progress_window.set_pause_callback(self._on_pause)
-        self._progress_window.set_resume_callback(self._on_resume)
-        self._progress_window.set_cancel_callback(self._on_cancel)
+        page.set_pause_callback(self._on_pause)
+        page.set_resume_callback(self._on_resume)
+        page.set_cancel_callback(self._on_cancel)
+        page._do_update_progress("Запуск процесса…", 0.0)
 
-        # Принудительно отрисовываем окно (в главном потоке — безопасно)
-        self._progress_window.update()
-        self.update()
-
-        # Показываем начальный статус (в главном потоке — безопасно)
-        self._progress_window._do_update_progress("Запуск процесса...", 0.0)
-        self._progress_window.update()
-        self.update()
-
-        # Запускаем pipeline в отдельном потоке
         self._pipeline_thread = threading.Thread(
             target=self._run_pipeline,
             daemon=True,
         )
         self._pipeline_thread.start()
-
-        # Запускаем watchdog-опрос очереди в главном потоке
-        # Это ЕДИНСТВЕННЫЙ безопасный способ коммуникации между потоками
-        # в PyInstaller --windowed сборке
         self.after(100, self._poll_msg_queue)
 
     def _poll_msg_queue(self):
@@ -214,43 +212,62 @@ class AudiobookApp(ctk.CTk):
                     engine = msg[5] if len(msg) > 5 else None
                     seg_idx = msg[6] if len(msg) > 6 else None
                     seg_total = msg[7] if len(msg) > 7 else None
-                    if self._progress_window:
-                        self._progress_window._do_update_progress(
+                    stage = msg[8] if len(msg) > 8 else None
+                    scope_line = msg[9] if len(msg) > 9 else None
+                    if self._progress_page:
+                        self._progress_page._do_update_progress(
                             status, progress,
                             current_text=current_text,
                             voice=voice,
                             engine=engine,
                             segment_index=seg_idx,
                             segment_total=seg_total,
+                            stage=stage,
+                            scope_line=scope_line,
                         )
+
+                elif msg_type == "canceled":
+                    _, cancel_msg = msg
+                    logger.info("Pipeline отменён: %s", cancel_msg)
+                    self._pipeline_started = False
+                    if self._progress_page:
+                        self._progress_page._do_update_progress(
+                            f"❌ {cancel_msg}", 0.0,
+                        )
+                        self._progress_page.show_finished(ok=False)
 
                 elif msg_type == "error":
                     # (type, err_msg)
                     _, err_msg = msg
                     logger.error("Ошибка pipeline: %s", err_msg)
-                    if self._progress_window:
-                        self._progress_window._do_update_progress(
+                    self._pipeline_started = False
+                    if self._progress_page:
+                        self._progress_page._do_update_progress(
                             f"❌ Ошибка: {err_msg}", 0.0
                         )
-                        self._progress_window.show_close_button()
+                        self._progress_page.show_finished(ok=False)
 
                 elif msg_type == "success":
                     # (type, message)
                     _, message = msg
                     logger.info("Pipeline завершён: %s", message)
-                    if self._progress_window:
-                        self._progress_window._do_update_progress(message, 1.0)
-                        self._progress_window.show_close_button()
+                    self._pipeline_started = False
+                    if self._progress_page:
+                        self._progress_page._do_update_progress(
+                            message, 1.0, stage="done",
+                        )
+                        self._progress_page.show_finished(ok=True)
 
                 elif msg_type == "fatal":
                     # (type, err_msg)
                     _, err_msg = msg
                     logger.error("Критическая ошибка pipeline: %s", err_msg)
-                    if self._progress_window:
-                        self._progress_window._do_update_progress(
+                    self._pipeline_started = False
+                    if self._progress_page:
+                        self._progress_page._do_update_progress(
                             f"❌ Критическая ошибка: {err_msg}", 0.0
                         )
-                        self._progress_window.show_close_button()
+                        self._progress_page.show_finished(ok=False)
 
         except queue.Empty:
             pass
@@ -336,48 +353,49 @@ class AudiobookApp(ctk.CTk):
 
             # Прогресс-колбэк — кладёт сообщения в queue.Queue, а НЕ вызывает tkinter!
             def progress_callback(status: str, progress: float, **details):
-                msg = ("progress", status, progress)
-                if details:
-                    msg = msg + (
-                        details.get("current_text"),
-                        details.get("voice"),
-                        details.get("engine"),
-                        details.get("segment_index"),
-                        details.get("segment_total"),
-                    )
-                self._msg_queue.put(msg)
+                self._msg_queue.put((
+                    "progress",
+                    status,
+                    progress,
+                    details.get("current_text"),
+                    details.get("voice"),
+                    details.get("engine"),
+                    details.get("segment_index"),
+                    details.get("segment_total"),
+                    details.get("stage"),
+                    details.get("scope_line"),
+                ))
 
-            # Детальный колбэк для синтеза — передаёт текст, голос, движок
+            # Детальный колбэк оставляем для совместимости бэкендов;
+            # основной UI-прогресс по сегментам идёт через progress_callback из pipeline.
             def detail_callback(
                 completed: int, total: int,
                 text_preview: str, voice: str, backend_name: str,
             ):
-                progress = 0.2 + (completed / total) * 0.2  # прогресс внутри шага синтеза
-                self._msg_queue.put((
-                    "progress",
-                    f"Синтез речи... ({completed}/{total})",
-                    progress,
-                    text_preview[:120],
-                    voice,
-                    backend_name,
-                    completed,
-                    total,
-                ))
+                return
 
             await self._pipeline.run(
                 progress_callback=progress_callback,
                 detail_callback=detail_callback,
             )
 
-            # Успешное завершение — тоже через очередь!
+            # Успешное завершение (в т.ч. частичный результат после отмены)
             self._msg_queue.put(("success", "✅ Аудиокнига создана!"))
+
+        except SynthesisCancelled as e:
+            logger.info("Создание отменено пользователем: %s", e)
+            self._msg_queue.put(("canceled", str(e) or "Создание аудиокниги отменено"))
 
         except Exception as e:
             err_msg = str(e)
-            logger.error(
-                "Ошибка создания аудиокниги: %s\n%s", err_msg, traceback.format_exc()
-            )
-            self._msg_queue.put(("error", err_msg))
+            if "отменен" in err_msg.lower():
+                logger.info("Создание отменено: %s", err_msg)
+                self._msg_queue.put(("canceled", err_msg))
+            else:
+                logger.error(
+                    "Ошибка создания аудиокниги: %s\n%s", err_msg, traceback.format_exc()
+                )
+                self._msg_queue.put(("error", err_msg))
 
     def _on_pause(self):
         """Обработчик паузы."""
@@ -392,10 +410,13 @@ class AudiobookApp(ctk.CTk):
             logger.info("Pipeline возобновлён")
 
     def _on_cancel(self):
-        """Обработчик отмены."""
+        """Отмена: флаг + дождаться конца текущей главы и частичной склейки."""
+        self._user_canceled = True
         if self._pipeline:
             self._pipeline.cancel()
-            logger.info("Pipeline отменён")
+            logger.info("Pipeline: запрошена отмена (после текущей главы)")
+        if self._progress_page:
+            self._progress_page.set_canceling()
 
     def on_closing(self):
         """Обработчик закрытия окна."""

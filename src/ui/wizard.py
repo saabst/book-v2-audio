@@ -20,16 +20,17 @@ from src.ui.pages import (
     PageScope,
     PageComments,
     PageLaunch,
+    PageCreate,
 )
 
 logger = logging.getLogger(__name__)
 
 # Названия шагов на разных языках
 STEP_NAMES = {
-    "ru": ["Язык", "API", "О нас", "Файл", "Объём", "Комментарии", "Запуск"],
-    "en": ["Language", "API", "About", "File", "Scope", "Comments", "Launch"],
-    "ja": ["言語", "API", "概要", "ファイル", "範囲", "コメント", "開始"],
-    "zh": ["语言", "API", "关于", "文件", "范围", "评论", "启动"],
+    "ru": ["Язык", "API", "О нас", "Файл", "Комментарии", "Объём", "Запуск", "Создание"],
+    "en": ["Language", "API", "About", "File", "Comments", "Scope", "Launch", "Create"],
+    "ja": ["言語", "API", "概要", "ファイル", "コメント", "範囲", "開始", "作成"],
+    "zh": ["语言", "API", "关于", "文件", "评论", "范围", "启动", "创建"],
 }
 
 # Тексты навигационных кнопок
@@ -69,8 +70,8 @@ class WizardController:
         self.step_labels: List[ctk.CTkLabel] = []
         self._create_step_indicator()
 
-        # Контейнер для содержимого страницы
-        self.content_frame = ctk.CTkFrame(parent)
+        # Контейнер для содержимого страницы (с прокруткой, если не помещается)
+        self.content_frame = ctk.CTkScrollableFrame(parent)
         self.content_frame.pack(fill="both", expand=True, padx=5, pady=5)
 
         # Навигационные кнопки
@@ -96,6 +97,21 @@ class WizardController:
         )
         self.next_btn.pack(side="right", padx=10, pady=5)
 
+        # Пауза / Отмена — на шаге «Создание» вместо «Далее»
+        create_t = self._create_nav_texts()
+        self.pause_btn = ctk.CTkButton(
+            self.nav_frame,
+            text=create_t["pause"],
+            width=130,
+        )
+        self.cancel_btn = ctk.CTkButton(
+            self.nav_frame,
+            text=create_t["cancel"],
+            width=130,
+            fg_color="red",
+            hover_color="darkred",
+        )
+
     def _create_step_indicator(self):
         """Создание индикатора шагов вверху мастера."""
         lang = self.settings.ui_lang
@@ -104,7 +120,7 @@ class WizardController:
             label = ctk.CTkLabel(
                 self.steps_frame,
                 text=f"{i + 1}. {name}",
-                font=ctk.CTkFont(size=11),
+                font=ctk.CTkFont(size=10),
             )
             label.pack(side="left", padx=8, pady=5, expand=True)
             self.step_labels.append(label)
@@ -125,6 +141,17 @@ class WizardController:
                 self.next_btn.configure(text=nav_t["next"])
         except Exception:
             pass
+        create_t = self._create_nav_texts(lang_code)
+        try:
+            if self.pause_btn.winfo_viewable():
+                # Не затираем «Продолжить», если сейчас на паузе
+                page = self.get_current_page()
+                if not (hasattr(page, "_paused") and page._paused):
+                    self.pause_btn.configure(text=create_t["pause"])
+            if self.cancel_btn.winfo_viewable():
+                self.cancel_btn.configure(text=create_t["cancel"])
+        except Exception:
+            pass
 
     def show_first_page(self):
         """Показать первую страницу."""
@@ -142,20 +169,26 @@ class WizardController:
             PageAPI,
             PageLogo,
             PageFile,
-            PageScope,
             PageComments,
+            PageScope,
             PageLaunch,
+            PageCreate,
         ]
 
         if index < 0 or index >= len(page_classes):
             return
 
         page_class = page_classes[index]
-        is_last = (index == len(page_classes) - 1)
+        is_create = index == len(page_classes) - 1
+        is_launch = index == len(page_classes) - 2
 
-        # Для последней страницы передаём on_complete (запуск pipeline),
-        # для остальных — _on_page_complete (сохранение данных)
-        page_callback = self.on_complete if is_last else self._on_page_complete
+        # Launch → переход на Создание; Создание → старт pipeline (on_complete)
+        if is_create:
+            page_callback = self.on_complete
+        elif is_launch:
+            page_callback = self._on_launch_clicked
+        else:
+            page_callback = self._on_page_complete
 
         # Для страницы языка передаём дополнительный колбэк смены языка
         kwargs = {}
@@ -169,25 +202,59 @@ class WizardController:
             **kwargs,
         )
         page.pack(fill="both", expand=True)
+        self._current_page = page
+
+        if is_create and hasattr(page, "set_nav_restore_callback"):
+            page.set_nav_restore_callback(self._restore_nav_after_create)
+        if is_create and hasattr(page, "bind_nav_controls"):
+            page.bind_nav_controls(self.pause_btn, self.cancel_btn)
 
         self.current_page_index = index
 
         # Обновляем индикатор шагов
         self._update_step_indicator(index)
 
-        # Обновляем кнопки навигации
-        self.back_btn.configure(
-            state="normal" if index > 0 else "disabled"
-        )
-
-        if is_last:
-            # На последней странице кнопка навигации не нужна —
-            # на самой странице есть зелёная кнопка запуска
+        # Навигация: на Создании — Пауза/Отмена вместо Далее; Назад выключен
+        if is_create:
             self.next_btn.pack_forget()
+            self.back_btn.configure(state="disabled")
+            create_t = self._create_nav_texts()
+            self.pause_btn.configure(text=create_t["pause"], state="normal")
+            self.cancel_btn.configure(text=create_t["cancel"], state="normal")
+            # side=right: первым пакуется правее
+            self.cancel_btn.pack(side="right", padx=10, pady=5)
+            self.pause_btn.pack(side="right", padx=10, pady=5)
         else:
+            self.pause_btn.pack_forget()
+            self.cancel_btn.pack_forget()
+            self.back_btn.configure(state="normal" if index > 0 else "disabled")
             self.next_btn.pack(side="right", padx=10, pady=5)
             nav_t = NAV_TEXTS.get(self.settings.ui_lang, NAV_TEXTS["ru"])
-            self.next_btn.configure(text=nav_t["next"])
+            self.next_btn.configure(
+                text=nav_t["next"],
+                fg_color=["#3B8ED0", "#1F6AA5"],
+                hover_color=["#36719F", "#144870"],
+            )
+
+    def _create_nav_texts(self, lang: Optional[str] = None) -> dict:
+        from src.ui.pages.page_create import CREATE_TEXTS
+        code = lang or self.settings.ui_lang
+        return CREATE_TEXTS.get(code, CREATE_TEXTS["ru"])
+
+    def _on_launch_clicked(self, *args, **kwargs):
+        """Совместимость: раньше зелёная кнопка на Запуске."""
+        self.go_next()
+
+    def _restore_nav_after_create(self):
+        """После завершения/отмены создания — стандартная «Назад» к Запуску."""
+        self.pause_btn.pack_forget()
+        self.cancel_btn.pack_forget()
+        self.next_btn.pack_forget()
+        self.back_btn.configure(state="normal")
+
+    def get_current_page(self):
+        """Текущая страница визарда."""
+        return getattr(self, "_current_page", None) or self._get_current_page()
 
     def _update_step_indicator(self, active_index: int):
         """Обновление подсветки активного шага."""
@@ -224,12 +291,10 @@ class WizardController:
             data = current_page.get_data()
             self._on_page_complete(data)
 
-        max_index = 6  # 7 страниц (0-6)
+        max_index = 7  # 8 страниц (0-7)
         if self.current_page_index < max_index:
             self._show_page(self.current_page_index + 1)
         else:
-            # Последняя страница — запуск
-            # Данные уже собраны через _on_page_complete выше
             if self.on_complete:
                 self.on_complete()
 

@@ -5,6 +5,7 @@ from .page_file import PageFile
 from .page_scope import PageScope
 from .page_comments import PageComments
 from .page_launch import PageLaunch
+from .page_create import PageCreate
 
 __all__ = [
     "PageLanguage",
@@ -14,4 +15,5 @@ __all__ = [
     "PageScope",
     "PageComments",
     "PageLaunch",
+    "PageCreate",
 ]

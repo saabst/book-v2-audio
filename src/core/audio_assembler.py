@@ -96,6 +96,7 @@ class AudioAssembler:
         self,
         segments: List[Tuple[Path, float]],
         output_path: Path,
+        fragment_callback: Optional[Callable[[int, int], None]] = None,
     ) -> Path:
         """Склейка аудиофрагментов в главу.
 
@@ -106,12 +107,14 @@ class AudioAssembler:
         Args:
             segments: Список кортежей (путь_к_аудио, пауза_перед_в_сек).
             output_path: Путь для сохранения готовой главы.
+            fragment_callback: После каждого фрагмента (готово, всего).
 
         Returns:
             Путь к готовому аудиофайлу главы.
         """
         logger.info("Склейка главы: %d фрагментов", len(segments))
         output_path.parent.mkdir(parents=True, exist_ok=True)
+        total = len(segments)
 
         with tempfile.TemporaryDirectory(prefix="chapter_") as tmp_dir:
             tmp_root = Path(tmp_dir)
@@ -127,6 +130,8 @@ class AudioAssembler:
 
                 if not audio_path.exists():
                     logger.warning("Файл не найден: %s", audio_path)
+                    if fragment_callback:
+                        fragment_callback(idx + 1, total)
                     continue
 
                 # Пре-декодируем каждый сегмент в WAV с едиными параметрами
@@ -139,6 +144,9 @@ class AudioAssembler:
                     str(wav_segment),
                 ])
                 wav_files.append(wav_segment)
+
+                if fragment_callback:
+                    fragment_callback(idx + 1, total)
 
             if not wav_files:
                 raise FileNotFoundError("Нет ни одного валидного аудиофайла для склейки главы")

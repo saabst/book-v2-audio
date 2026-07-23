@@ -10,6 +10,10 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
 
+class SynthesisCancelled(Exception):
+    """Пользователь отменил синтез / создание аудиокниги."""
+
+
 class TTSBackend(ABC):
     """Интерфейс движка синтеза речи.
 

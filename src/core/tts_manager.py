@@ -6,11 +6,12 @@
 from __future__ import annotations
 
 import logging
+import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
-from src.core.tts_base import TTSBackend
+from src.core.tts_base import SynthesisCancelled, TTSBackend
 
 logger = logging.getLogger(__name__)
 
@@ -92,10 +93,21 @@ class TTSManager:
     def __init__(self, config: TTSConfig):
         self.config = config
         self._backend: Optional[TTSBackend] = None
+        self._cancel_event: Optional[threading.Event] = None
+
+    def bind_cancel_event(self, event: Optional[threading.Event]) -> None:
+        """Привязать событие отмены (проверяется между сегментами и retry)."""
+        self._cancel_event = event
+
+    def raise_if_canceled(self) -> None:
+        if self._cancel_event is not None and self._cancel_event.is_set():
+            raise SynthesisCancelled("Создание аудиокниги отменено")
 
     async def _get_backend(self) -> TTSBackend:
         """Ленивая инициализация бэкенда."""
         if self._backend is not None:
+            if hasattr(self._backend, "bind_cancel_event"):
+                self._backend.bind_cancel_event(self._cancel_event)
             return self._backend
 
         if self.config.backend == "edge":
@@ -112,6 +124,9 @@ class TTSManager:
             self._backend = SileroTTSManager(self.config)
         else:
             raise ValueError(f"Неизвестный TTS-бэкенд: {self.config.backend}")
+
+        if hasattr(self._backend, "bind_cancel_event"):
+            self._backend.bind_cancel_event(self._cancel_event)
 
         logger.info("TTS бэкенд: %s", BACKEND_NAMES.get(self.config.backend, self.config.backend))
         return self._backend

@@ -1,11 +1,10 @@
 """
 Оркестратор — координация всех модулей для создания аудиокниги.
-Управляет потоком: парсинг → разбиение → комментарии → TTS → склейка.
+Поток: парсинг → анализ сегментов → синтез → склейка глав → склейка книги.
 """
 
 from __future__ import annotations
 
-import asyncio
 import logging
 import threading
 import time
@@ -17,8 +16,17 @@ from .fb2_parser import FB2Parser, ParsedBook
 from .sentence_splitter import SentenceSplitter
 from .comment_manager import CommentManager, CommentConfig
 from .tts_manager import TTSManager, TTSConfig
+from .tts_base import SynthesisCancelled
 from .audio_assembler import AudioAssembler
 from .checkpoint_manager import CheckpointManager, Checkpoint
+from src.utils.scope_display import (
+    STAGE_PREPARE,
+    STAGE_SYNTH,
+    STAGE_CHAPTER_MERGE,
+    STAGE_BOOK_MERGE,
+    STAGE_DONE,
+    format_progress_scope_line,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -26,37 +34,36 @@ logger = logging.getLogger(__name__)
 @dataclass
 class AppConfig:
     """Полная конфигурация приложения."""
-    # Пути
     book_path: Path = Path("")
     output_dir: Path = Path.home() / "audiobooks"
     work_dir: Path = Path.home() / ".audiobook-generator"
 
-    # Настройки книги
     lang: str = "ru"
     chapter_start: int = 0  # 0 = с начала
     chapter_end: int = 0    # 0 = до конца
 
-    # Комментарии
     comment_config: CommentConfig = field(default_factory=CommentConfig)
-
-    # TTS
     tts_config: TTSConfig = field(default_factory=TTSConfig)
 
 
-class Pipeline:
-    """Оркестратор процесса создания аудиокниги.
+@dataclass
+class _ChapterJob:
+    """Подготовленная глава: текст разбит, комментарии готовы."""
+    chapter_num: int
+    title: str
+    sentences: List[str]
+    comments: List[Optional[str]]
+    chapter_dir: Path
+    segment_count: int
 
-    Пример использования:
-        config = AppConfig(
-            book_path=Path("book.fb2"),
-            output_dir=Path("./output"),
-        )
-        pipeline = Pipeline(config)
-        result = await pipeline.run(
-            progress_callback=lambda c, t: print(f"{c}/{t}"),
-            cancel_event=threading.Event(),
-        )
-    """
+
+class Pipeline:
+    """Оркестратор процесса создания аудиокниги."""
+
+    _W_PREPARE = 0.08
+    _W_SYNTH = 0.72
+    _W_CH_MERGE = 0.15
+    _W_BOOK = 0.05
 
     def __init__(self, config: AppConfig):
         self.config = config
@@ -72,219 +79,336 @@ class Pipeline:
         self._chapter_audio_paths: List[Path] = []
         self._paused = False
         self._pause_event = threading.Event()
-        self._pause_event.set()  # не на паузе
-        self._cancel_event = threading.Event()  # не отменён
+        self._pause_event.set()
+        self._cancel_event = threading.Event()
 
     async def run(
         self,
-        progress_callback: Optional[Callable[[str, float], None]] = None,
+        progress_callback: Optional[Callable] = None,
         cancel_event: Optional[threading.Event] = None,
-        detail_callback: Optional[Callable[[int, int, str, str, str], None]] = None,
+        detail_callback: Optional[Callable] = None,
     ) -> Path:
-        """Запуск полного процесса создания аудиокниги.
+        """Парсинг → анализ всех сегментов → синтез → склейка глав → склейка книги.
 
-        Args:
-            progress_callback: Колбэк прогресса (статус, процент 0.0-1.0).
-            cancel_event: Событие отмены.
-            detail_callback: Колбэк деталей синтеза (номер, всего, текст, голос, движок).
-
-        Returns:
-            Путь к финальному MP3-файлу.
-
-        Raises:
-            ValueError: Если книга не загружена.
+        При отмене после частичного синтеза склеивает готовые главы в partial-файл.
         """
         if cancel_event is None:
             cancel_event = self._cancel_event
 
         self._temp_dir = self.config.work_dir / "temp_audio"
+        self._temp_dir.mkdir(parents=True, exist_ok=True)
         self._chapter_audio_paths = []
+        success = False
 
         try:
-            # Шаг 1: Парсинг FB2
-            self._report(progress_callback, "Парсинг FB2-файла...", 0.0)
+            self._report(progress_callback, "Парсинг FB2-файла…", 0.0, stage=STAGE_PREPARE)
             book = self.fb2_parser.parse(self.config.book_path)
             self._book = book
-
             if not book.chapters:
                 raise ValueError("В книге нет глав")
 
             total_chapters = len(book.chapters)
-            start_chapter = self.config.chapter_start or 0
-            end_chapter = self.config.chapter_end or total_chapters
+            cfg_start = self.config.chapter_start or 0
+            cfg_end = self.config.chapter_end or 0
+            start_chapter = cfg_start
+            end_chapter = cfg_end or total_chapters
             chapters_to_process = book.chapters[start_chapter:end_chapter]
+            if not chapters_to_process:
+                raise ValueError("В выбранном диапазоне нет глав")
+
+            ui_lang = self.config.lang or "ru"
+
+            def _scope_line(chapter_1based: Optional[int] = None) -> str:
+                return format_progress_scope_line(
+                    chapter_current=chapter_1based,
+                    chapter_start=cfg_start,
+                    chapter_end=cfg_end,
+                    total_chapters=total_chapters,
+                    lang=ui_lang,
+                )
 
             self._report(
                 progress_callback,
-                f"Книга: '{book.metadata.title}', глав: {len(chapters_to_process)}",
-                0.05,
+                f"Книга: «{book.metadata.title}» — анализ сегментов…",
+                0.02,
+                stage=STAGE_PREPARE,
+                scope_line=_scope_line(),
             )
 
-            # Проверка чекпоинта
-            checkpoint = self.checkpoint_manager.load()
-            resume_from = 0
-            if checkpoint and checkpoint.book_path == str(self.config.book_path):
-                resume_from = checkpoint.last_completed_chapter + 1
-
-                # Если чекпоинт указывает на главу вне текущего диапазона — очищаем и начинаем сначала
-                if resume_from >= end_chapter:
-                    logger.warning(
-                        "Чекпоинт (глава %d) вне диапазона [%d, %d), очищаю и начинаю сначала",
-                        checkpoint.last_completed_chapter, start_chapter, end_chapter,
-                    )
-                    self.checkpoint_manager.clear()
-                    resume_from = 0
-                else:
-                    self._report(
-                        progress_callback,
-                        f"Восстановление с главы {resume_from + 1}...",
-                        0.05,
-                    )
-
-            # Шаг 2-4: Обработка каждой главы
+            jobs: List[_ChapterJob] = []
+            n_ch = len(chapters_to_process)
             for idx, chapter in enumerate(chapters_to_process):
                 if cancel_event.is_set():
-                    self._report(progress_callback, "Процесс отменён", 0.0)
                     break
-
-                # Ожидание снятия паузы
                 self._pause_event.wait()
 
                 chapter_num = start_chapter + idx
-                if chapter_num < resume_from:
-                    continue
-
-                chapter_progress = 0.1 + (idx / len(chapters_to_process)) * 0.8
-
-                # Разбиение на предложения
+                scope_now = _scope_line(chapter_num + 1)
+                prep_prog = 0.02 + (idx / n_ch) * (self._W_PREPARE - 0.02)
                 self._report(
                     progress_callback,
-                    f"Глава {chapter_num + 1}/{total_chapters}: разбиение на предложения...",
-                    chapter_progress,
+                    "Разбиение на предложения…",
+                    prep_prog,
+                    stage=STAGE_PREPARE,
+                    scope_line=scope_now,
                 )
+
                 sentences = self.sentence_splitter.split(
                     " ".join(chapter.paragraphs),
                     book.metadata.lang,
                 )
-
                 if not sentences:
                     logger.warning("Глава %d пуста, пропуск", chapter_num + 1)
                     continue
 
-                # Генерация комментариев (если включены)
                 if self.config.comment_config.enabled:
                     self._report(
                         progress_callback,
-                        f"Глава {chapter_num + 1}/{total_chapters}: генерация комментариев...",
-                        chapter_progress + 0.05,
+                        "Генерация комментариев…",
+                        prep_prog,
+                        stage=STAGE_PREPARE,
+                        scope_line=scope_now,
                     )
                     comments = await self.comment_manager.generate_all(
-                        sentences,
-                        progress_callback=None,
+                        sentences, progress_callback=None,
                     )
                 else:
                     comments = [None] * len(sentences)
 
-                # Синтез речи
-                self._report(
-                    progress_callback,
-                    f"Глава {chapter_num + 1}/{total_chapters}: синтез речи...",
-                    chapter_progress + 0.2,
-                )
-
+                seg_count = len(sentences) + sum(1 for c in comments if c)
                 chapter_dir = self._temp_dir / f"chapter_{chapter_num:04d}"
-                await self.tts_manager.synthesize_chapter(
-                    text_segments=sentences,
-                    comment_segments=comments,
+                chapter_dir.mkdir(parents=True, exist_ok=True)
+                jobs.append(_ChapterJob(
+                    chapter_num=chapter_num,
+                    title=chapter.title or f"Глава {chapter_num + 1}",
+                    sentences=sentences,
+                    comments=comments,
                     chapter_dir=chapter_dir,
-                    detail_callback=detail_callback,
-                )
+                    segment_count=seg_count,
+                ))
 
-                # Склейка аудиофрагментов главы
+            if not jobs:
+                if cancel_event.is_set():
+                    raise SynthesisCancelled("Создание аудиокниги отменено")
+                raise ValueError("Нет глав для озвучки после разбиения")
+
+            total_segments = sum(j.segment_count for j in jobs)
+            n_jobs = len(jobs)
+            self._report(
+                progress_callback,
+                f"Сегментов к синтезу: {total_segments} в {n_jobs} гл.",
+                self._W_PREPARE,
+                stage=STAGE_PREPARE,
+                scope_line=_scope_line(),
+                segment_index=0,
+                segment_total=total_segments,
+            )
+
+            synthesized: List[_ChapterJob] = []
+            global_done = 0
+
+            for job_idx, job in enumerate(jobs):
+                if cancel_event.is_set():
+                    break
+                self._pause_event.wait()
+
+                scope_now = _scope_line(job.chapter_num + 1)
                 self._report(
                     progress_callback,
-                    f"Глава {chapter_num + 1}/{total_chapters}: склейка аудио...",
-                    chapter_progress + 0.4,
+                    f"Синтез главы {job_idx + 1}/{n_jobs}…",
+                    self._W_PREPARE + self._W_SYNTH * (global_done / max(total_segments, 1)),
+                    stage=STAGE_SYNTH,
+                    scope_line=scope_now,
+                    segment_index=global_done,
+                    segment_total=total_segments,
                 )
 
-                chapter_audio = await self._assemble_chapter_audio(
-                    sentences, comments, chapter_dir, chapter_num,
-                )
-                self._chapter_audio_paths.append(chapter_audio)
+                seg_base = global_done
 
-                # Сохранение чекпоинта
-                config_dict = {
-                    "book_path": str(self.config.book_path),
-                    "lang": self.config.lang,
-                    "comment_frequency": self.config.comment_config.frequency,
-                    "provider": self.config.comment_config.provider,
-                }
+                def _detail_cb(
+                    completed: int,
+                    total: int,
+                    text: str,
+                    voice: str,
+                    backend: str,
+                    *,
+                    _base=seg_base,
+                    _scope=scope_now,
+                ):
+                    # completed — номер текущего (ещё не завершённого) сегмента в главе
+                    current = _base + completed
+                    prog = self._W_PREPARE + self._W_SYNTH * (
+                        (_base + completed - 1) / max(total_segments, 1)
+                    )
+                    if progress_callback:
+                        progress_callback(
+                            f"Сегмент {current}/{total_segments}",
+                            prog,
+                            stage=STAGE_SYNTH,
+                            scope_line=_scope,
+                            current_text=text,
+                            voice=voice,
+                            engine=backend,
+                            segment_index=current,
+                            segment_total=total_segments,
+                        )
+                    if detail_callback:
+                        detail_callback(current, total_segments, text, voice, backend)
+
+                def _seg_progress(
+                    completed: int,
+                    total: int,
+                    *,
+                    _base=seg_base,
+                    _scope=scope_now,
+                ):
+                    # completed — число завершённых сегментов в текущей главе
+                    finished = _base + completed
+                    prog = self._W_PREPARE + self._W_SYNTH * (
+                        finished / max(total_segments, 1)
+                    )
+                    if progress_callback:
+                        progress_callback(
+                            f"Сегмент {finished}/{total_segments}",
+                            prog,
+                            stage=STAGE_SYNTH,
+                            scope_line=_scope,
+                            segment_index=finished,
+                            segment_total=total_segments,
+                        )
+
+                await self.tts_manager.synthesize_chapter(
+                    text_segments=job.sentences,
+                    comment_segments=job.comments,
+                    chapter_dir=job.chapter_dir,
+                    progress_callback=_seg_progress,
+                    detail_callback=_detail_cb,
+                )
+                global_done += job.segment_count
+                synthesized.append(job)
+
                 self.checkpoint_manager.save(Checkpoint(
                     book_path=str(self.config.book_path),
-                    last_completed_chapter=chapter_num,
+                    last_completed_chapter=job.chapter_num,
                     total_chapters=total_chapters,
-                    config_hash=CheckpointManager.compute_config_hash(config_dict),
+                    config_hash=CheckpointManager.compute_config_hash({
+                        "book_path": str(self.config.book_path),
+                        "lang": self.config.lang,
+                        "comment_frequency": self.config.comment_config.frequency,
+                        "provider": self.config.comment_config.provider,
+                    }),
                     timestamp=time.time(),
                     output_dir=str(self._temp_dir),
                 ))
 
-            # Шаг 5: Склейка книги
-            if self._chapter_audio_paths:
-                if cancel_event.is_set():
-                    # Пользователь отменил процесс, но часть глав уже готова
-                    self._report(
-                        progress_callback,
-                        "Процесс отменён. Готовые главы не склеены в книгу.",
-                        0.0,
+            canceled = cancel_event.is_set()
+            if not synthesized:
+                raise SynthesisCancelled("Создание аудиокниги отменено") if canceled else ValueError(
+                    "Нет синтезированных глав"
+                )
+
+            self._chapter_audio_paths = []
+            n_syn = len(synthesized)
+            total_merge_frags = sum(j.segment_count for j in synthesized)
+            merge_done = 0
+
+            self._report(
+                progress_callback,
+                f"Склейка глав: сегментов {total_merge_frags}…",
+                self._W_PREPARE + self._W_SYNTH,
+                stage=STAGE_CHAPTER_MERGE,
+                scope_line=_scope_line(),
+                segment_index=0,
+                segment_total=total_merge_frags,
+            )
+
+            for midx, job in enumerate(synthesized):
+                self._pause_event.wait()
+                scope_now = _scope_line(job.chapter_num + 1)
+
+                def _frag_progress(
+                    completed: int,
+                    total: int,
+                    *,
+                    _base=merge_done,
+                    _scope=scope_now,
+                    _midx=midx,
+                ):
+                    finished = _base + completed
+                    prog = (
+                        self._W_PREPARE + self._W_SYNTH
+                        + self._W_CH_MERGE * (finished / max(total_merge_frags, 1))
                     )
-                    return Path("")
-                else:
-                    self._report(
-                        progress_callback,
-                        "Склейка всех глав в аудиокнигу...",
-                        0.95,
-                    )
+                    if progress_callback:
+                        progress_callback(
+                            f"Склейка главы {_midx + 1}/{n_syn}: "
+                            f"сегмент {finished}/{total_merge_frags}",
+                            prog,
+                            stage=STAGE_CHAPTER_MERGE,
+                            scope_line=_scope,
+                            segment_index=finished,
+                            segment_total=total_merge_frags,
+                        )
 
-                    output_filename = f"{book.metadata.title}.mp3"
-                    # Очищаем имя файла от недопустимых символов
-                    output_filename = "".join(
-                        c for c in output_filename
-                        if c.isalnum() or c in " .-_()"
-                    ).strip()
+                chapter_audio = await self._assemble_chapter_audio(
+                    job.sentences, job.comments, job.chapter_dir, job.chapter_num,
+                    fragment_callback=_frag_progress,
+                )
+                self._chapter_audio_paths.append(chapter_audio)
+                merge_done += job.segment_count
 
-                    output_path = self.config.output_dir / output_filename
-                    self.audio_assembler.assemble_book(
-                        self._chapter_audio_paths,
-                        output_path,
-                    )
+            if not self._chapter_audio_paths:
+                raise ValueError("Не удалось склеить ни одной главы")
 
-                    # Очистка чекпоинта
-                    self.checkpoint_manager.clear()
+            partial = canceled or len(synthesized) < n_jobs
+            self._report(
+                progress_callback,
+                "Склеивание книги суммарно…"
+                + (" (частичный результат)" if partial else ""),
+                0.95,
+                stage=STAGE_BOOK_MERGE,
+                scope_line=_scope_line(),
+                segment_index=len(self._chapter_audio_paths),
+                segment_total=n_jobs,
+            )
 
-                    self._report(
-                        progress_callback,
-                        f"Аудиокнига готова: {output_path}",
-                        1.0,
-                    )
+            title = book.metadata.title or "audiobook"
+            if partial:
+                first = synthesized[0].chapter_num + 1
+                last = (
+                    synthesized[len(self._chapter_audio_paths) - 1].chapter_num + 1
+                )
+                title = f"{title} (главы {first}-{last})"
 
-                    return output_path
+            output_filename = "".join(
+                c for c in f"{title}.mp3" if c.isalnum() or c in " .-_()"
+            ).strip()
+            self.config.output_dir.mkdir(parents=True, exist_ok=True)
+            output_path = self.config.output_dir / output_filename
+            self.audio_assembler.assemble_book(
+                self._chapter_audio_paths,
+                output_path,
+            )
 
-            else:
-                if cancel_event.is_set():
-                    raise ValueError("Создание аудиокниги отменено")
-                else:
-                    raise ValueError("Не удалось создать аудиокнигу: нет обработанных глав")
+            success = True
+            msg = (
+                f"Частичная аудиокнига готова: {output_path}"
+                if partial else f"Аудиокнига готова: {output_path}"
+            )
+            self._report(
+                progress_callback, msg, 1.0,
+                stage=STAGE_DONE, scope_line=_scope_line(),
+            )
+            return output_path
 
         finally:
-            # Очистка временных файлов
             if self._temp_dir and self._temp_dir.exists():
-                self.audio_assembler.cleanup_temp_files(self._temp_dir)
-
-            # Очищаем чекпоинт при любом прерывании (кроме успешного завершения):
-            # временные файлы удалены, так что чекпоинт бесполезен.
-            # Если дошли до return output_path в строке 245 — clear() уже вызван,
-            # вызывать повторно безвредно (clear проверяет exists()).
+                try:
+                    self.audio_assembler.cleanup_temp_files(self._temp_dir)
+                except Exception as exc:
+                    logger.warning("Очистка temp не удалась: %s", exc)
             self.checkpoint_manager.clear()
+
 
     async def _assemble_chapter_audio(
         self,
@@ -292,6 +416,7 @@ class Pipeline:
         comments: List[Optional[str]],
         chapter_dir: Path,
         chapter_num: int,
+        fragment_callback: Optional[Callable[[int, int], None]] = None,
     ) -> Path:
         """Сборка аудиофрагментов главы в один файл."""
         segments: List[Tuple[Path, float]] = []
@@ -319,7 +444,11 @@ class Pipeline:
                     segments[-1] = (segments[-1][0], tts_cfg.pause_after_comment)
 
         chapter_output = self._temp_dir / f"chapter_{chapter_num:04d}_audio.wav"
-        return self.audio_assembler.assemble_chapter(segments, chapter_output)
+        return self.audio_assembler.assemble_chapter(
+            segments,
+            chapter_output,
+            fragment_callback=fragment_callback,
+        )
 
     def pause(self):
         """Поставить процесс на паузу."""
@@ -349,14 +478,19 @@ class Pipeline:
 
     def _report(
         self,
-        callback: Optional[Callable[[str, float], None]],
+        callback: Optional[Callable],
         message: str,
         progress: float,
+        **details,
     ):
         """Отправка отчёта о прогрессе."""
         if callback:
-            callback(message, progress)
-        logger.info("[%.0f%%] %s", progress * 100, message)
+            try:
+                callback(message, progress, **details)
+            except TypeError:
+                callback(message, progress)
+        stage = details.get("stage", "")
+        logger.info("[%.0f%%]%s %s", progress * 100, f" [{stage}]" if stage else "", message)
 
     async def close(self):
         """Освобождение ресурсов."""
