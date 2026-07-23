@@ -21,6 +21,7 @@ import subprocess
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from src.core.audio_bitrate import clamp_bitrate, ffmpeg_lame_bitrate_args
 from src.core.tts_base import TTSBackend
 
 logger = logging.getLogger(__name__)
@@ -268,13 +269,20 @@ class SileroTTSManager(TTSBackend):
         )
         return mp3_path
 
+    def _mp3_codec_args(self) -> list:
+        kbps = clamp_bitrate(
+            getattr(self.config, "backend", "silero"),
+            int(getattr(self.config, "audio_bitrate_kbps", 0) or 0),
+        )
+        return ffmpeg_lame_bitrate_args(kbps)
+
     async def _generate_silence_mp3(self, output_path: Path, duration_sec: float = 0.5):
         """Сгенерировать тишину через ffmpeg."""
         cmd = [
             "ffmpeg", "-y",
             "-f", "lavfi", "-i", "anullsrc=r=22050:cl=mono",
             "-t", str(duration_sec),
-            "-acodec", "libmp3lame", "-q:a", "2",
+            *self._mp3_codec_args(),
             str(output_path),
         ]
         process = await asyncio.create_subprocess_exec(
@@ -295,7 +303,7 @@ class SileroTTSManager(TTSBackend):
             cmd = [
                 "ffmpeg", "-y", "-i", str(wav_path),
                 "-ar", "22050",
-                "-codec:a", "libmp3lame", "-q:a", "2",
+                *self._mp3_codec_args(),
                 str(output_path),
             ]
         else:
@@ -303,7 +311,7 @@ class SileroTTSManager(TTSBackend):
                 "ffmpeg", "-y", "-i", str(wav_path),
                 "-ar", "22050",
                 "-filter:a", f"atempo={speed}",
-                "-codec:a", "libmp3lame", "-q:a", "2",
+                *self._mp3_codec_args(),
                 str(output_path),
             ]
 

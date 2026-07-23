@@ -12,6 +12,11 @@ import tomllib as tomli
 import customtkinter as ctk
 
 from src.config.settings import Settings
+from src.core.audio_bitrate import (
+    bitrate_menu_labels,
+    clamp_bitrate,
+    parse_bitrate_label,
+)
 from src.core.tts_manager import resolve_voice
 
 logger = logging.getLogger(__name__)
@@ -28,6 +33,8 @@ COMMENTS_TEXTS = {
         "custom_label": "Или введите свой системный промпт:",
         "tts_label": "TTS движок:",
         "tts_desc": "Edge TTS — облачный, высокое качество, возможны сбои.\\nPiper — локальный, на CPU, без интернета, чуть ниже качество.\\nSupertonic 3 — локальный, отличное качество, 31 язык, ~305 МБ.\\nSilero TTS v5 — локальный, лучшее качество русского среди open-source.",
+        "bitrate_label": "Битрейт аудио:",
+        "bitrate_desc": "Для Edge фиксирован Microsoft (48 kbps). Для локальных движков — сегменты и финальный MP3.",
         "gender_main_label": "Пол основного голоса:",
         "gender_comment_label": "Пол голоса комментатора:",
         "gender_male": "Мужской",
@@ -43,6 +50,8 @@ COMMENTS_TEXTS = {
         "custom_label": "Or enter your own system prompt:",
         "tts_label": "TTS engine:",
         "tts_desc": "Edge TTS — cloud-based, high quality, but may have outages.\\nPiper — local, CPU-only, no internet needed, slightly lower quality.\\nSupertonic 3 — local, high quality, 31 languages, ~305 MB.\\nSilero TTS v5 — local, best russian quality among open-source.",
+        "bitrate_label": "Audio bitrate:",
+        "bitrate_desc": "Edge is fixed by Microsoft (48 kbps). For local engines — segments and final MP3.",
         "gender_main_label": "Main voice gender:",
         "gender_comment_label": "Comment voice gender:",
         "gender_male": "Male",
@@ -58,6 +67,8 @@ COMMENTS_TEXTS = {
         "custom_label": "または独自のシステムプロンプトを入力:",
         "tts_label": "TTSエンジン:",
         "tts_desc": "Edge TTS — クラウド、高品質だが障害の可能性あり。\\nPiper — ローカル、CPU動作、オフラインでも使用可能。\\nSupertonic 3 — ローカル、高品質、31言語、~305 MB。\\nSilero TTS v5 — ローカル、ロシア語に最適なオープンソースTTS。",
+        "bitrate_label": "ビットレート:",
+        "bitrate_desc": "EdgeはMicrosoft固定（48 kbps）。ローカルエンジンはセグメントと最終MP3に適用。",
         "gender_main_label": "本文声の性別:",
         "gender_comment_label": "コメント声の性別:",
         "gender_male": "男性",
@@ -73,6 +84,8 @@ COMMENTS_TEXTS = {
         "custom_label": "或输入您自己的系统提示：",
         "tts_label": "TTS引擎：",
         "tts_desc": "Edge TTS — 云端，高质量，但可能中断。\\nPiper — 本地，CPU运行，无需网络，质量稍低。\\nSupertonic 3 — 本地，高质量，31种语言，~305 MB。\\nSilero TTS v5 — 本地，开源中俄语质量最佳。",
+        "bitrate_label": "音频比特率：",
+        "bitrate_desc": "Edge由Microsoft固定（48 kbps）。本地引擎用于片段和最终MP3。",
         "gender_main_label": "正文语音性别：",
         "gender_comment_label": "评论语音性别：",
         "gender_male": "男",
@@ -244,6 +257,42 @@ class PageComments(ctk.CTkFrame):
         )
         self.tts_desc_label.pack(anchor="w", padx=10, pady=(0, 10))
 
+        ctk.CTkLabel(
+            tts_frame,
+            text=t["bitrate_label"],
+            font=ctk.CTkFont(size=14),
+        ).pack(anchor="w", padx=10, pady=(5, 5))
+
+        initial_backend = self.tts_backend_var.get()
+        initial_kbps = clamp_bitrate(
+            initial_backend, int(getattr(self.settings, "tts_bitrate_kbps", 0) or 0),
+        )
+        bitrate_values = bitrate_menu_labels(initial_backend, lang)
+        self.bitrate_var = ctk.StringVar(
+            value=next(
+                (v for v in bitrate_values if v.startswith(f"{initial_kbps} ")),
+                bitrate_values[0],
+            )
+        )
+        self.bitrate_menu = ctk.CTkOptionMenu(
+            tts_frame,
+            values=bitrate_values,
+            variable=self.bitrate_var,
+            width=300,
+            state="disabled" if initial_backend == "edge" else "normal",
+        )
+        self.bitrate_menu.pack(anchor="w", padx=10, pady=(0, 5))
+
+        self.bitrate_desc_label = ctk.CTkLabel(
+            tts_frame,
+            text=t["bitrate_desc"],
+            font=ctk.CTkFont(size=12),
+            text_color="gray",
+            wraplength=500,
+            justify="left",
+        )
+        self.bitrate_desc_label.pack(anchor="w", padx=10, pady=(0, 10))
+
         # --- Пол голоса ---
         gender_frame = ctk.CTkFrame(self)
         gender_frame.pack(fill="x", padx=40, pady=10)
@@ -365,21 +414,31 @@ class PageComments(ctk.CTkFrame):
                     child.configure(state=state)
 
     def _on_tts_backend_change(self, backend: str):
-        """Обработчик выбора TTS движка."""
+        """Обработчик выбора TTS движка — обновить список битрейтов."""
         lang = self.settings.ui_lang
-        t = COMMENTS_TEXTS.get(lang, COMMENTS_TEXTS["ru"])
-        # Описание обновляется автоматически при переключении
+        current = parse_bitrate_label(self.bitrate_var.get())
+        kbps = clamp_bitrate(backend, current)
+        values = bitrate_menu_labels(backend, lang)
+        self.bitrate_menu.configure(
+            values=values,
+            state="disabled" if backend == "edge" else "normal",
+        )
+        label = next((v for v in values if v.startswith(f"{kbps} ")), values[0])
+        self.bitrate_var.set(label)
 
     def get_data(self) -> dict:
         """Сбор данных со страницы."""
         frequency = int(self.frequency_var.get())
         system_prompt = self.custom_prompt_text.get("1.0", "end-1c").strip()
+        backend = self.tts_backend_var.get()
+        bitrate = clamp_bitrate(backend, parse_bitrate_label(self.bitrate_var.get()))
 
         return {
             "comment_enabled": self.comments_enabled_var.get(),
             "comment_frequency": frequency,
             "system_prompt": system_prompt,
-            "tts_backend": self.tts_backend_var.get(),
+            "tts_backend": backend,
+            "tts_bitrate_kbps": bitrate,
             "main_gender": self.main_gender_var.get(),
             "comment_gender": self.comment_gender_var.get(),
         }

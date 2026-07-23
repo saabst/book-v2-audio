@@ -71,6 +71,8 @@ class TTSConfig:
     pause_before_comment: float = 1.0  # секунд тишины перед комментарием
     pause_after_comment: float = 0.7  # секунд тишины после комментария
     pause_between_sentences: float = 0.3  # пауза между предложениями
+    # Битрейт сегментов и финального MP3 (kbps). Edge-сегменты всегда 48.
+    audio_bitrate_kbps: int = 48
 
 
 # Словарь для обратной связи backend → читаемое название

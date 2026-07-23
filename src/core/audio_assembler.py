@@ -16,6 +16,8 @@ import tempfile
 from pathlib import Path
 from typing import Callable, List, Optional, Tuple
 
+from src.core.audio_bitrate import ffmpeg_lame_bitrate_args
+
 logger = logging.getLogger(__name__)
 
 
@@ -36,7 +38,7 @@ class AudioAssembler:
         )
     """
 
-    def __init__(self, sample_rate: int = 22050):
+    def __init__(self, sample_rate: int = 22050, bitrate_kbps: int = 128):
         """Инициализация AudioAssembler.
 
         Args:
@@ -45,8 +47,10 @@ class AudioAssembler:
                 Edge TTS (через ffmpeg) будет передискретизирован под эту частоту
                 при склейке, что обеспечивает консистентность всех аудиофрагментов
                 и предотвращает белый шум из-за mismatch в ffmpeg concat demuxer.
+            bitrate_kbps: Битрейт финального MP3 (CBR).
         """
         self.sample_rate = sample_rate
+        self.bitrate_kbps = int(bitrate_kbps) or 128
         self._ffmpeg = self._find_ffmpeg()
 
     # ── helpers ────────────────────────────────────────────────
@@ -229,12 +233,10 @@ class AudioAssembler:
                 "-y", str(merged_wav),
             ])
 
-            # Финальное кодирование в MP3
+            # Финальное кодирование в MP3 (явный CBR без -q:a)
             self._run_ffmpeg([
                 "-i", str(merged_wav),
-                "-codec:a", "libmp3lame",
-                "-b:a", "192k",
-                "-q:a", "0",
+                *ffmpeg_lame_bitrate_args(self.bitrate_kbps),
                 "-y", str(output_path),
             ])
 

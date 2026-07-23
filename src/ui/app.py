@@ -20,6 +20,7 @@ from src.config.key_manager import KeyManager
 from src.core.comment_manager import CommentConfig
 from src.core.pipeline import AppConfig, Pipeline
 from src.core.tts_manager import TTSConfig, resolve_voice
+from src.core.audio_bitrate import clamp_bitrate
 from src.ui.progress_window import ProgressWindow
 from src.ui.wizard import WizardController
 
@@ -320,6 +321,10 @@ class AudiobookApp(ctk.CTk):
                 pause_before_comment=self.settings.pause_before_comment,
                 pause_after_comment=self.settings.pause_after_comment,
                 pause_between_sentences=self.settings.pause_between_sentences,
+                audio_bitrate_kbps=clamp_bitrate(
+                    self.settings.tts_backend,
+                    int(getattr(self.settings, "tts_bitrate_kbps", 0) or 0),
+                ),
             )
 
             config = AppConfig(

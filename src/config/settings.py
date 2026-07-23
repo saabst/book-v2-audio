@@ -32,6 +32,8 @@ class Settings:
 
     # TTS бэкенд
     tts_backend: str = "edge"  # "edge" | "piper" | "supertonic" | "silero"
+    # Битрейт MP3 (kbps); для Edge всегда 48
+    tts_bitrate_kbps: int = 48
 
     # Пол голосов TTS (резолвятся в имена через движок + язык книги)
     main_gender: str = "female"
@@ -148,6 +150,11 @@ def load_settings(config_path: Optional[Path] = None) -> Settings:
         filtered_data = {k: v for k, v in data.items() if k in known_fields}
 
         settings = Settings(**filtered_data)
+        # Битрейт должен быть допустим для выбранного движка
+        from src.core.audio_bitrate import clamp_bitrate
+        settings.tts_bitrate_kbps = clamp_bitrate(
+            settings.tts_backend, int(settings.tts_bitrate_kbps or 0),
+        )
         logger.info("Настройки загружены: %s", path)
         return settings
 
